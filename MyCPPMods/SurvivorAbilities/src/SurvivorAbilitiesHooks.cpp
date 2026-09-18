@@ -5,7 +5,7 @@
 
 #include <atomic>
 
-// v1.0.1: Windows.h is needed for SEH (__try/__except/EXCEPTION_EXECUTE_HANDLER).
+// v1.0.2: Windows.h is needed for SEH (__try/__except/EXCEPTION_EXECUTE_HANDLER).
 // NOMINMAX is CRITICAL: without it Windows.h defines min/max macros that break
 // std::numeric_limits<...>::max() everywhere in UE4SS headers.
 // WIN32_LEAN_AND_MEAN trims the Windows API surface we do not need.
@@ -27,7 +27,6 @@
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/Core/Containers/Array.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
-#include <Unreal/World.hpp>   // v1.0.1: UWorld lives here, not UWorld.hpp
 
 using namespace RC;
 using namespace RC::Unreal;
@@ -56,7 +55,7 @@ namespace SurvivorAbilities
 
     static std::atomic<bool> g_bShutdown{false};
 
-    // v1.0.1: set the first time ANY UE4SS call raises an SEH exception.
+    // v1.0.2: set the first time ANY UE4SS call raises an SEH exception.
     // Once true, every entry point (Update / OnHotkeyPressed / finders)
     // returns immediately and we never touch UE4SS again. This prevents a
     // cascade of AVs during world teardown -- the crash occurs once, gets
@@ -109,11 +108,6 @@ namespace SurvivorAbilities
         constexpr size_t LootContainer_StaticMesh  = 0x02C8;
 
         constexpr size_t Firearm_PlayerActiveWeapon = 0x03F8;
-
-        // v1.0.1: UWorld::bIsTearingDown -- world teardown flag.
-        // Verified against UE4SS 3.0.1 Beta experimental build on
-        // SurrounDead v0.8.0 (UE 5.6.1).
-        constexpr size_t World_bIsTearingDown       = 0x018D;
 
         // UObjectBase::EObjectFlags lives at offset 0x08 on UE5.6.
         constexpr size_t Object_Flags               = 0x08;
@@ -229,7 +223,7 @@ namespace SurvivorAbilities
     }
 
     // =================================================================
-    // v1.0.1: Teardown guards (use-after-free fix, second iteration)
+    // v1.0.2: Teardown guards
     // =================================================================
     // Background:
     //   UE4SS keeps firing on_update for several frames after UWorld starts
@@ -239,10 +233,13 @@ namespace SurvivorAbilities
     //   entries becomes a dangling pointer. UE4SS then writes to
     //   (nullptr + 0x24), triggering the AV.
     //
-    //   Checking IsWorldAlive() BEFORE the FindFirstOf is useless: the crash
-    //   happens INSIDE FindFirstOf, before we get to inspect anything.
+    //   v1.0.1 attempted to pre-check via UWorld::bIsTearingDown, but the
+    //   bit at offset 0x18D is a bitfield shared by bBegunPlay / bMatchStarted
+    //   / bStartup etc. Reading the whole byte (as bool) yields TRUE during
+    //   normal gameplay, which incorrectly flagged the world as "dead" and
+    //   disabled the whole mod. Removed in v1.0.2.
     //
-    // Strategy:
+    // Strategy (v1.0.2):
     //   1) SEH-wrap every call into UE4SS that could touch the dying world.
     //   2) The first time SEH catches an AV, set g_bTeardownDetected.
     //   3) Every entry point checks that flag at the top and returns early.
@@ -277,80 +274,6 @@ namespace SurvivorAbilities
             g_bTeardownDetected.store(true, std::memory_order_relaxed);
             return true;
         }
-    }
-
-    // --- FindFirstOfWorld_NoSEH: does the actual FindFirstOf call.
-    //     Lives SEPARATE from the SEH wrapper because it needs a StringType
-    //     temporary from STR("World"), and any object with a destructor is
-    //     incompatible with __try in the same function (C2712).
-    //
-    //     The name StringType is heap-allocated once for the process
-    //     lifetime. Two reasons: (1) it must outlive the SEH wrapper's
-    //     frame, (2) a function-local static StringType would still be
-    //     seen by MSVC as a destructible local in the *enclosing* function
-    //     if any SEH block came later in the same scope.
-    static StringType* GetWorldNameStorage()
-    {
-        static StringType* sName = nullptr;
-        if (!sName)
-        {
-            sName = new StringType(STR("World"));
-        }
-        return sName;
-    }
-
-    static UObject* FindFirstOfWorld_NoSEH()
-    {
-        return UObjectGlobals::FindFirstOf(*GetWorldNameStorage());
-    }
-
-    // --- FindWorldObject: thin SEH wrapper around FindFirstOfWorld_NoSEH.
-    //     Body contains only POD locals (UObject*), so __try is legal here.
-    static UObject* FindWorldObject()
-    {
-        if (g_bTeardownDetected.load(std::memory_order_relaxed)) return nullptr;
-
-        UObject* result = nullptr;
-        __try
-        {
-            result = FindFirstOfWorld_NoSEH();
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            g_bTeardownDetected.store(true, std::memory_order_relaxed);
-            result = nullptr;
-        }
-        return result;
-    }
-
-    // --- IsWorldAlive_NoSEH: reads the bIsTearingDown flag. No __try here,
-    //     but also no destructible locals -- this is a plain accessor.
-    static bool IsWorldAlive_NoSEH(UObject* world)
-    {
-        bool tearing = *reinterpret_cast<bool*>(
-            reinterpret_cast<uint8_t*>(world) + Off::World_bIsTearingDown);
-        return !tearing;
-    }
-
-    static bool IsWorldAlive()
-    {
-        if (g_bTeardownDetected.load(std::memory_order_relaxed)) return false;
-
-        UObject* world = FindWorldObject();
-        if (!world) return false;
-        if (IsPendingKill(world)) return false;
-
-        bool result = false;
-        __try
-        {
-            result = IsWorldAlive_NoSEH(world);
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            g_bTeardownDetected.store(true, std::memory_order_relaxed);
-            result = false;
-        }
-        return result;
     }
 
     static bool GetActorLocation(UObject* actor, double& x, double& y, double& z)
@@ -502,8 +425,8 @@ namespace SurvivorAbilities
     // =================================================================
     // Discovery
     // =================================================================
-    // v1.0.1: the actual body of the resolver lives in ...Impl so that the
-    // thin SEH wrapper (which contains __try/__except and must NOT have any
+    // The actual body of the resolver lives in ...Impl so that the thin
+    // SEH wrapper (which contains __try/__except and must NOT have any
     // StringType temporaries on the stack) can call into it.
     static UObject* ResolveCurrentPawnImpl()
     {
@@ -558,9 +481,11 @@ namespace SurvivorAbilities
 
     static void FindPlayer()
     {
-        // v1.0.1: hard guard -- do not touch anything if the world is gone.
+        // v1.0.2: only the soft teardown flag gates us now. The old
+        // IsWorldAlive() check has been removed because UWorld::bIsTearingDown
+        // shares its byte with bBegunPlay / bMatchStarted / bStartup and the
+        // whole-byte read was returning true during normal gameplay.
         if (g_bTeardownDetected.load(std::memory_order_relaxed)) return;
-        if (!IsWorldAlive()) return;
 
         UObject* found = ResolveCurrentPawn();
 
@@ -584,7 +509,7 @@ namespace SurvivorAbilities
                reinterpret_cast<size_t>(g_Player));
     }
 
-    // v1.0.1: split for the same C2712 reason as ResolveCurrentPawn.
+    // split for the same C2712 reason as ResolveCurrentPawn.
     static void FindComponentsImpl()
     {
         if (!g_Player) return;
@@ -1855,8 +1780,7 @@ namespace SurvivorAbilities
         if (g_bShutdown.load()) return;
         if (!g_bEnabled) return;
         if (UE4SSProgram::unreal_is_shutting_down) return;
-        if (g_bTeardownDetected.load(std::memory_order_relaxed)) return;  // v1.0.1
-        if (!IsWorldAlive()) return;                                       // v1.0.1
+        if (g_bTeardownDetected.load(std::memory_order_relaxed)) return;
 
         FindPlayer();
         if (!g_Player) return;
@@ -1886,8 +1810,7 @@ namespace SurvivorAbilities
     void OnHotkeyPressed(Hotkey key)
     {
         if (!g_bEnabled) return;
-        if (g_bTeardownDetected.load(std::memory_order_relaxed)) return;  // v1.0.1
-        if (!IsWorldAlive()) return;                                       // v1.0.1
+        if (g_bTeardownDetected.load(std::memory_order_relaxed)) return;
 
         FindPlayer();
         if (g_Player && (!g_MedicalComp || !g_PassiveSkills || !g_FnClientUpdateHealth))
