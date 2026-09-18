@@ -1,1 +1,1 @@
-add_subdirectory(SmartMedic)
+add_subdirectory(SurvivorAbilities)

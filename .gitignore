@@ -15,6 +15,7 @@ RE-UE4SS/
 *.opendb
 ipch/
 build.ps1
+deploy.ps1
 
 # Compiled objects
 *.obj

@@ -1,15 +1,15 @@
-file(GLOB_RECURSE SMARTMEDIC_SOURCES CONFIGURE_DEPENDS
+file(GLOB_RECURSE SurvivorAbilities_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
 
-add_library(SmartMedic SHARED ${SMARTMEDIC_SOURCES})
+add_library(SurvivorAbilities SHARED ${SurvivorAbilities_SOURCES})
 
-set_target_properties(SmartMedic PROPERTIES
+set_target_properties(SurvivorAbilities PROPERTIES
     PREFIX ""
     SUFFIX ".dll"
 )
 
-target_include_directories(SmartMedic PRIVATE
+target_include_directories(SurvivorAbilities PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/RE-UE4SS/UE4SS/include
     ${CMAKE_SOURCE_DIR}/RE-UE4SS/UE4SS/generated_include
@@ -36,4 +36,4 @@ target_include_directories(SmartMedic PRIVATE
 )
 
 # Транзитивные include/link-зависимости — как у AutoSortLoot
-target_link_libraries(SmartMedic PRIVATE UE4SS)
+target_link_libraries(SurvivorAbilities PRIVATE UE4SS)
